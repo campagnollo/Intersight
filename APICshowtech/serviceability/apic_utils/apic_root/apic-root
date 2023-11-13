@@ -1,0 +1,14 @@
+#!/bin/bash
+
+if [ ${#} -ne 1 ]
+then
+echo "IFC IP please"
+exit
+fi
+
+host=$1;
+token=$(sshpass -p 'ins3965!' ssh -o StrictHostKeyChecking=no admin@${host} "acidiag dbgtoken" )
+wget -O /var/tmp/temp_${USER}.html "http://172.31.165.52/cgi-bin/generateRootPassword.py?key=$token"
+root_pwd=$(cat /var/tmp/temp_${USER}.html | grep "<pre>" | awk -F 'pre>' '{print $2}' | sed 's/<\/$//g')
+echo "root password is ${root_pwd}"
+sshpass -p "${root_pwd}" ssh -o StrictHostKeyChecking=no root@${host}

@@ -1,0 +1,127 @@
+#!/bin/bash
+
+# APIC filesystem
+UPGRADE_BIN_NAME="apic_dc"
+UPGRADE_BIN_DIR="/data2/infra/intersightdc/upgrade/sw/bin"
+UPGRADE_VER_FILE="/data2/infra/intersightdc/upgrade/sw/VERSION"
+UPGRADE_IMAGE_FLAG_FILE="/data2/infra/intersightdc/data/upgradeImageFlag.txt"
+UPGRADE_IMAGE_UI_HOST="/data2/infra/intersightdc/upgrade/sw/ui"
+
+# DC container filesystem
+BUILD_IMAGE_BIN="/home/intersightdc/sw/bin/apic_dc"
+BUILD_IMAGE_VERSION="/home/intersightdc/sw/VERSION" 
+BUILD_IMAGE_UI="/home/intersightdc/sw/ui"
+UPGRADE_IMAGE_UI="/intersightdc/upgrade/sw/ui"
+UPGRADE_IMAGE_SW_DIR="/intersightdc/upgrade/sw"
+
+# Local files
+LOCAL_BIN=""
+HOST=""
+ROOT_PWD=""
+
+get_root_pwd() {
+	token=$(sshpass -p 'ins3965!' ssh -o StrictHostKeyChecking=no admin@${HOST} "acidiag dbgtoken" )
+	wget -q -O /var/tmp/temp_${USER}.html "http://172.31.165.52/cgi-bin/generateRootPassword.py?key=$token"
+	ROOT_PWD=$(cat /var/tmp/temp_${USER}.html | grep "<pre>" | awk -F 'pre>' '{print $2}' | sed 's/<\/$//g')
+	echo "root password is ${ROOT_PWD}"
+}
+
+uninstall_custom_dc() {
+	get_root_pwd
+	echo "Please allow 30 seconds for uninstall"
+	sshpass -p "$ROOT_PWD" ssh -o StrictHostKeyChecking=no root@${HOST} <<- ENDSSH	
+	rm "$UPGRADE_BIN_DIR/$UPGRADE_BIN_NAME"
+	rm "$UPGRADE_VER_FILE"
+	rm -r "$UPGRADE_IMAGE_UI_HOST"
+
+	# Get container id
+	CONTAINER_ID=\$(podman ps | grep apic_dc)
+	CONTAINER_ID=\${CONTAINER_ID:0:12}
+
+	# Kill dc process in container
+	podman exec \$CONTAINER_ID pkill apic_dc
+
+	# We need to wait to delete UPGRADE_IMAGE_FLAG_FILE so that wrapper_script doesn't
+	# log an abormal exit
+	sleep 22
+	rm "$UPGRADE_IMAGE_FLAG_FILE"
+
+	ENDSSH
+
+}
+
+install_dc() {
+	get_root_pwd
+	sshpass -p "$ROOT_PWD" ssh -o StrictHostKeyChecking=no root@${HOST} "mkdir -p $UPGRADE_BIN_DIR"
+	sshpass -p "$ROOT_PWD" scp "$LOCAL_BIN" root@${HOST}:${UPGRADE_BIN_DIR}/${UPGRADE_BIN_NAME}
+	sshpass -p "$ROOT_PWD" ssh -o StrictHostKeyChecking=no root@${HOST} <<- ENDSSH	
+	touch "$UPGRADE_IMAGE_FLAG_FILE"
+	echo "2.0.0-001" > "$UPGRADE_VER_FILE"
+
+	# Get container id
+	CONTAINER_ID=\$(podman ps | grep apic_dc)
+	CONTAINER_ID=\${CONTAINER_ID:0:12}
+
+	# Copy existing ui files to expected location for upgrade
+	podman exec \$CONTAINER_ID cp -R "$BUILD_IMAGE_UI" "$UPGRADE_IMAGE_SW_DIR"
+
+	# Kill dc process in container
+	podman exec \$CONTAINER_ID pkill apic_dc
+
+	ENDSSH
+}
+
+parse_options() {
+	while getopts "H:i:" arg; do
+		case "$arg" in 
+			H) 
+				echo "Target host is $OPTARG"
+				HOST=$OPTARG
+				;;
+
+			i)
+				echo "DC binary to install is $OPTARG"
+				LOCAL_BIN=$OPTARG
+				;;
+
+			?) 
+				echo "Usage: $(basename $0) command -H apic_hostname [-i dc_binary] "
+				exit 1
+				;;
+		esac
+	done
+}
+
+CMD="$1"
+shift
+parse_options $@
+
+if [ -z $HOST ] 
+then
+	echo "Hostname for target APIC must be specified with -H"
+	exit 1
+fi
+
+if [ $CMD == "install" ] && [ -z $LOCAL_BIN ] 
+then
+	echo "DC binary file must be specified with -i if installing"
+fi
+
+if [ $CMD == "install" ] && [ $(basename $LOCAL_BIN) != "apic_dc" ] 
+then
+	echo "Make sure file specified is a dc executable with name apic_dc"
+fi
+
+
+case "$CMD" in
+	install)
+		install_dc
+		;;
+	revert)
+		uninstall_custom_dc
+		;;
+	*)
+		echo "Unrecognized command"
+		exit 1
+		;;
+esac
